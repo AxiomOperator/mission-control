@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+# ── Trap ERR for clean failure messages ───────────────────────────────────────
+trap 'err "Installation failed at line $LINENO — see output above for details"' ERR
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 MC_PORT="${MC_PORT:-3000}"
 MC_DATA_DIR=""
@@ -22,12 +25,12 @@ INSTALL_DIR="${MC_INSTALL_DIR:-$(pwd)/mission-control}"
 # ── Parse arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --docker)       DEPLOY_MODE="docker"; shift ;;
-    --local)        DEPLOY_MODE="local"; shift ;;
-    --port)         MC_PORT="$2"; shift 2 ;;
-    --data-dir)     MC_DATA_DIR="$2"; shift 2 ;;
+    --docker)        DEPLOY_MODE="docker"; shift ;;
+    --local)         DEPLOY_MODE="local"; shift ;;
+    --port)          MC_PORT="$2"; shift 2 ;;
+    --data-dir)      MC_DATA_DIR="$2"; shift 2 ;;
     --skip-openclaw) SKIP_OPENCLAW=true; shift ;;
-    --dir)          INSTALL_DIR="$2"; shift 2 ;;
+    --dir)           INSTALL_DIR="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: install.sh [--docker|--local] [--port PORT] [--data-dir DIR] [--dir INSTALL_DIR] [--skip-openclaw]"
       exit 0 ;;
@@ -43,6 +46,14 @@ err()   { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
 die()   { err "$*"; exit 1; }
 
 command_exists() { command -v "$1" &>/dev/null; }
+
+# ── Fix #11: Validate that MC_PORT is a valid port number (1–65535) ───────────
+validate_port() {
+  local port="$1"
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
+    die "Invalid port '$port'. Must be an integer between 1 and 65535."
+  fi
+}
 
 detect_os() {
   local os arch
@@ -67,7 +78,8 @@ detect_os() {
 check_prerequisites() {
   local has_docker=false has_node=false
 
-  if command_exists docker && docker info &>/dev/null 2>&1; then
+  # Fix #7: removed redundant 2>&1 — &>/dev/null already redirects both streams
+  if command_exists docker && docker info &>/dev/null; then
     has_docker=true
     ok "Docker available ($(docker --version | head -1))"
   fi
@@ -112,12 +124,18 @@ check_prerequisites() {
   fi
 }
 
-# ── Clone or update repo ─────────────────────────────────────────────────────
+# ── Clone or update repo ──────────────────────────────────────────────────────
 fetch_source() {
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     info "Updating existing installation at $INSTALL_DIR..."
     cd "$INSTALL_DIR"
-    git fetch --tags
+    # Fix #2: unshallow so git describe has full tag history
+    if git rev-parse --is-shallow-repository &>/dev/null \
+        && [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+      git fetch --unshallow --tags
+    else
+      git fetch --tags
+    fi
     local latest_tag
     latest_tag=$(git describe --tags --abbrev=0 origin/main 2>/dev/null || echo "")
     if [[ -n "$latest_tag" ]]; then
@@ -127,10 +145,15 @@ fetch_source() {
       git pull origin main
       ok "Updated to latest main"
     fi
+  # Fix #3: guard against an existing non-git directory
+  elif [[ -d "$INSTALL_DIR" ]]; then
+    die "'$INSTALL_DIR' already exists but is not a git repository. " \
+        "Remove it or choose a different --dir path and retry."
   else
     info "Cloning Mission Control..."
     if command_exists git; then
-      git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+      # Fix #2: full clone so git describe works on future update runs
+      git clone "$REPO_URL" "$INSTALL_DIR"
       cd "$INSTALL_DIR"
       ok "Cloned to $INSTALL_DIR"
     else
@@ -145,6 +168,10 @@ setup_env() {
     info "Existing .env found — keeping current configuration"
     return
   fi
+
+  # Fix #10: guard for missing generate-env.sh before attempting to run it
+  [[ -f "$INSTALL_DIR/scripts/generate-env.sh" ]] \
+    || die "scripts/generate-env.sh not found — installation may be incomplete"
 
   info "Generating secure .env configuration..."
   bash "$INSTALL_DIR/scripts/generate-env.sh" "$INSTALL_DIR/.env"
@@ -180,7 +207,8 @@ deploy_docker() {
       break
     fi
     sleep 2
-    ((retries--))
+    # Fix #1: use arithmetic assignment to avoid set -e triggering at zero
+    retries=$((retries - 1))
   done
 
   if [[ $retries -eq 0 ]]; then
@@ -196,7 +224,12 @@ deploy_local() {
   info "Starting local deployment..."
 
   cd "$INSTALL_DIR"
-  pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+
+  # Fix #13: removed 2>/dev/null suppression so lockfile errors surface clearly
+  if ! pnpm install --frozen-lockfile; then
+    warn "Frozen lockfile install failed — retrying without --frozen-lockfile"
+    pnpm install
+  fi
   ok "Dependencies installed"
 
   info "Building Mission Control..."
@@ -208,21 +241,39 @@ deploy_local() {
     setup_systemd
   fi
 
-  info "Starting Mission Control..."
-  PORT="$MC_PORT" nohup pnpm start > "$INSTALL_DIR/.data/mc.log" 2>&1 &
-  local pid=$!
-  echo "$pid" > "$INSTALL_DIR/.data/mc.pid"
+  # Fix #4: wire MC_DATA_DIR — use it as the data dir when provided
+  local data_dir="${MC_DATA_DIR:-$INSTALL_DIR/.data}"
+  mkdir -p "$data_dir"
 
-  sleep 3
+  info "Starting Mission Control..."
+  PORT="$MC_PORT" nohup pnpm start > "$data_dir/mc.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$data_dir/mc.pid"
+
+  # Fix #14: poll instead of fixed sleep
+  local retries=15
+  while [[ $retries -gt 0 ]]; do
+    if kill -0 "$pid" 2>/dev/null; then
+      if curl -sf "http://localhost:$MC_PORT" &>/dev/null; then
+        break
+      fi
+    else
+      err "Process exited unexpectedly. Check logs: $data_dir/mc.log"
+      exit 1
+    fi
+    sleep 2
+    retries=$((retries - 1))
+  done
+
   if kill -0 "$pid" 2>/dev/null; then
     ok "Mission Control running (PID $pid)"
   else
-    err "Failed to start. Check logs: $INSTALL_DIR/.data/mc.log"
+    err "Failed to start. Check logs: $data_dir/mc.log"
     exit 1
   fi
 }
 
-# ── Systemd service ──────────────────────────────────────────────────────────
+# ── Systemd service ───────────────────────────────────────────────────────────
 setup_systemd() {
   local service_file="/etc/systemd/system/mission-control.service"
   if [[ -f "$service_file" ]]; then
@@ -233,8 +284,9 @@ setup_systemd() {
   info "Creating systemd service..."
   local user
   user="$(whoami)"
+  # Fix #8: use command -v instead of which for portability and consistency
   local node_path
-  node_path="$(which node)"
+  node_path="$(command -v node)"
 
   cat > /tmp/mission-control.service <<UNIT
 [Unit]
@@ -268,7 +320,7 @@ UNIT
   fi
 }
 
-# ── OpenClaw fleet check ─────────────────────────────────────────────────────
+# ── OpenClaw fleet check ──────────────────────────────────────────────────────
 check_openclaw() {
   if $SKIP_OPENCLAW; then
     info "Skipping OpenClaw checks (--skip-openclaw)"
@@ -316,7 +368,8 @@ check_openclaw() {
       pid="$(cat "$pidfile" 2>/dev/null)" || continue
       if ! kill -0 "$pid" 2>/dev/null; then
         rm -f "$pidfile"
-        ((stale_count++))
+        # Fix #1: safe arithmetic — avoid set -e triggering when value is 0
+        stale_count=$((stale_count + 1))
       fi
     done
     if [[ $stale_count -gt 0 ]]; then
@@ -326,12 +379,9 @@ check_openclaw() {
     # Check logs directory size
     local logs_dir="$oc_home/logs"
     if [[ -d "$logs_dir" ]]; then
+      # Fix #5: both branches were identical — collapsed into one
       local logs_size
-      if [[ "$(uname)" == "Darwin" ]]; then
-        logs_size="$(du -sh "$logs_dir" 2>/dev/null | cut -f1)"
-      else
-        logs_size="$(du -sh "$logs_dir" 2>/dev/null | cut -f1)"
-      fi
+      logs_size="$(du -sh "$logs_dir" 2>/dev/null | cut -f1)"
       info "Logs directory: $logs_size ($logs_dir)"
 
       # Clean old logs (> 30 days)
@@ -348,7 +398,8 @@ check_openclaw() {
     if [[ -d "$workspace" ]]; then
       local agent_count
       agent_count=$(find "$workspace" -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-      ((agent_count--)) # subtract the workspace dir itself
+      # Fix #1: safe arithmetic — avoid set -e triggering when agent_count is 0
+      agent_count=$((agent_count - 1)) # subtract the workspace dir itself
       info "Workspace: $agent_count agent workspace(s) in $workspace"
     fi
   else
@@ -375,19 +426,23 @@ main() {
   echo "  ╚══════════════════════════════════════╝"
   echo ""
 
+  # Fix #11: validate port early before doing any real work
+  validate_port "$MC_PORT"
+
   detect_os
   check_prerequisites
 
-  # If running from within an existing clone, use current dir
-  if [[ -f "$(pwd)/package.json" ]] && grep -q '"mission-control"' "$(pwd)/package.json" 2>/dev/null; then
+  # Fix #9: broaden grep to match scoped package names (e.g. @org/mission-control)
+  if [[ -f "$(pwd)/package.json" ]] && grep -q '"name".*mission-control' "$(pwd)/package.json" 2>/dev/null; then
     INSTALL_DIR="$(pwd)"
     info "Running from existing clone at $INSTALL_DIR"
   else
     fetch_source
   fi
 
-  # Ensure data directory exists
-  mkdir -p "$INSTALL_DIR/.data"
+  # Fix #4: respect MC_DATA_DIR when provided, fall back to INSTALL_DIR/.data
+  local data_dir="${MC_DATA_DIR:-$INSTALL_DIR/.data}"
+  mkdir -p "$data_dir"
 
   setup_env
 
@@ -399,7 +454,7 @@ main() {
 
   check_openclaw
 
-  # ── Print summary ──
+  # ── Print summary ──────────────────────────────────────────────────────────
   echo ""
   echo "  ╔══════════════════════════════════════╗"
   echo "  ║   Installation Complete              ║"
@@ -407,7 +462,7 @@ main() {
   echo ""
   info "Dashboard:  http://localhost:$MC_PORT"
   info "Mode:       $DEPLOY_MODE"
-  info "Data:       $INSTALL_DIR/.data/"
+  info "Data:       $data_dir/"
   echo ""
   info "Credentials are in: $INSTALL_DIR/.env"
   echo ""
@@ -419,8 +474,8 @@ main() {
     info "  docker compose down            # stop"
   else
     info "Manage:"
-    info "  cat $INSTALL_DIR/.data/mc.log  # view logs"
-    info "  kill \$(cat $INSTALL_DIR/.data/mc.pid)  # stop"
+    info "  cat $data_dir/mc.log                    # view logs"
+    info "  kill \$(cat $data_dir/mc.pid)  # stop"
   fi
 
   echo ""

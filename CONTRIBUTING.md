@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Mission Control.
 
 ```bash
 # Clone the repo
-git clone https://github.com/builderz-labs/mission-control.git
+git clone https://github.com/AxiomOperator/mission-control.git
 cd mission-control
 
 # Install dependencies

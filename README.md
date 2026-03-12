@@ -39,7 +39,7 @@ Running AI agents at scale means juggling sessions, tasks, costs, and reliabilit
 ### One-Command Install (Docker)
 
 ```bash
-git clone https://github.com/builderz-labs/mission-control.git
+git clone https://github.com/AxiomOperator/mission-control.git
 cd mission-control
 bash install.sh --docker
 ```
@@ -49,7 +49,7 @@ The installer auto-generates secure credentials, starts the container, and runs 
 ### One-Command Install (Local)
 
 ```bash
-git clone https://github.com/builderz-labs/mission-control.git
+git clone https://github.com/AxiomOperator/mission-control.git
 cd mission-control
 bash install.sh --local
 ```
@@ -62,7 +62,7 @@ Requires Node.js 22.x (LTS) and pnpm (auto-installed via corepack if missing).
 > Mission Control is validated against Node 22 across local dev, CI, Docker, and standalone deploys. Use `nvm use 22` (or your version manager equivalent) before installing or starting the app.
 
 ```bash
-git clone https://github.com/builderz-labs/mission-control.git
+git clone https://github.com/AxiomOperator/mission-control.git
 cd mission-control
 nvm use 22
 pnpm install
@@ -736,3 +736,26 @@ If you find this project useful, consider supporting my open-source work.
 ## License
 
 [MIT](LICENSE) © 2026 [Builderz Labs](https://github.com/builderz-labs/mission-control)
+
+---
+
+## Code Review Documentation
+
+Comprehensive Frontend/UI Layer reviews are available:
+
+- **[REVIEW_SUMMARY.txt](./REVIEW_SUMMARY.txt)** - Executive summary with key metrics and findings
+- **[FRONTEND_REVIEW.md](./FRONTEND_REVIEW.md)** - Detailed technical assessment with line references
+
+### Review Scope
+- 88 React component files
+- 4 app router pages  
+- ~42,000 lines of frontend code
+- Design system and styling configuration
+
+### Key Findings Summary
+- **CRITICAL**: 2 issues (monolithic main page, massive panel components)
+- **HIGH**: 4 issues (weak typing, direct API calls, accessibility, server/client boundaries)
+- **MEDIUM**: 7 issues (loading states, state management, performance)
+- **LOW**: 8 issues (dead code, documentation, testing)
+
+See REVIEW_SUMMARY.txt for overview and FRONTEND_REVIEW.md for detailed analysis.

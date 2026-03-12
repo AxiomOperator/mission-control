@@ -16,7 +16,7 @@ Mission Control is an open-source dashboard for orchestrating AI agents: agents,
 ## Quick Start (5 Minutes)
 
 ```bash
-git clone https://github.com/builderz-labs/mission-control.git
+git clone https://github.com/AxiomOperator/mission-control.git
 cd mission-control
 pnpm install
 cp .env.example .env

@@ -186,7 +186,7 @@ mission-control/
 ## Quick Start Section
 
 ```bash
-git clone https://github.com/builderz-labs/mission-control.git
+git clone https://github.com/AxiomOperator/mission-control.git
 cd mission-control
 pnpm install
 cp .env.example .env    # edit with your values
